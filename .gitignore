@@ -1,0 +1,13 @@
+data_from_kaggle.zip
+data/
+checkpoints/
+outputs/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.env
+.DS_Store
+*.log
