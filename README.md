@@ -57,3 +57,6 @@ DriveGAN의 전체 재현이 아니라, world model의 핵심 아이디어라고
 - 기존의 x_t → x_{t+1} 구조에서 
 [x_{t-3}, x_{t-2}, x_{t-1}, x_t] + a_t → x_{t+1} 으로 변경
 
+
+<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/cff0c2f9-25db-4339-9d5a-7336209fb7df" />
+
