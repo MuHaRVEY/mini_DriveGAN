@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from dataset import DrivingFrameDataset
-from model import MiniDriveGAN
+from dataset import DrivingSequenceDataset
+from model import MiniDriveGANSequence
 from utils import save_prediction_samples
 
 
@@ -14,25 +14,26 @@ def train():
     csv_path = "data/labels.csv"
     frame_dir = "data/frames"
 
-    batch_size = 16
+    batch_size = 8
     lr = 1e-3
     epochs = 20
     image_size = 128
-    latent_dim = 256
-    num_input_frames = 4
+    hidden_dim = 256
+    seq_len = 4
 
-    dataset = DrivingFrameDataset(
+    dataset = DrivingSequenceDataset(
         csv_path=csv_path,
         frame_dir=frame_dir,
         image_size=image_size,
-        num_input_frames = num_input_frames
+        seq_len=seq_len
     )
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    model = MiniDriveGAN(latent_dim=latent_dim, action_dim=1,
-                         in_channels= 3 * num_input_frames
-                         ).to(device)
+    model = MiniDriveGANSequence(
+        hidden_dim=hidden_dim,
+        action_dim=1
+    ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     recon_loss_fn = nn.L1Loss()
@@ -44,27 +45,23 @@ def train():
         model.train()
         total_loss = 0.0
 
-        for x_t, steering, x_next in loader:
-            x_t = x_t.to(device)
-            steering = steering.to(device)
-            x_next = x_next.to(device)
+        for x_seq, steering, x_next in loader:
+            x_seq = x_seq.to(device)         # [B, T, 3, H, W]
+            steering = steering.to(device)   # [B, 1]
+            x_next = x_next.to(device)       # [B, 3, H, W]
 
-            x_pred, z_t, z_next_pred = model(x_t, steering)
+            x_pred, z_seq, z_next_pred, _, _ = model(x_seq, steering)
 
             loss_recon = recon_loss_fn(x_pred, x_next)
 
-            # optional latent consistency target
             with torch.no_grad():
-                z_next_true = model.encoder(
-                    torch.cat([
-                        x_t[:,3:,:,:],
-                        x_next],
-                        dim=1)
-                )
-                
+                # 실제 다음 latent target:
+                # 입력 시퀀스에서 첫 프레임 제거하고 x_next 추가
+                next_seq = torch.cat([x_seq[:, 1:], x_next.unsqueeze(1)], dim=1)
+                z_next_true_seq = model.encode_sequence(next_seq)
+                z_next_true = z_next_true_seq[:, -1]
 
             loss_latent = nn.functional.mse_loss(z_next_pred, z_next_true)
-
             loss = loss_recon + 0.1 * loss_latent
 
             optimizer.zero_grad()
@@ -79,15 +76,22 @@ def train():
         model.eval()
         with torch.no_grad():
             sample_batch = next(iter(loader))
-            x_t, steering, x_next = sample_batch
-            x_t = x_t.to(device)
+            x_seq, steering, x_next = sample_batch
+
+            x_seq = x_seq.to(device)
             steering = steering.to(device)
             x_next = x_next.to(device)
 
-            x_pred, _, _ = model(x_t, steering)
-            save_prediction_samples(x_t.cpu(), x_next.cpu(), x_pred.cpu(), "outputs", epoch)
+            x_pred, _, _, _, _ = model(x_seq, steering)
+            save_prediction_samples(
+                x_seq.cpu(),
+                x_next.cpu(),
+                x_pred.cpu(),
+                "outputs",
+                epoch
+            )
 
-        torch.save(model.state_dict(), f"checkpoints/mini_drivegan_epoch_{epoch}.pth")
+        torch.save(model.state_dict(), f"checkpoints/mini_drivegan_sequence_epoch_{epoch}.pth")
 
 
 if __name__ == "__main__":
