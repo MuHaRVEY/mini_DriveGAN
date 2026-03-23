@@ -19,11 +19,11 @@ import torch.nn as nn
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=128):
+    def __init__(self, latent_dim=128, in_channels=12): # RGB 이미지 4장을 사용하도록 3에서 12로
         super().__init__()
 
         self.conv = nn.Sequential(
-            nn.Conv2d(3, 32, 4, 2, 1),   # 128 -> 64
+            nn.Conv2d(in_channels, 32, 4, 2, 1),   # 128 -> 64
             nn.ReLU(inplace=True),
 
             nn.Conv2d(32, 64, 4, 2, 1),  # 64 -> 32
@@ -59,12 +59,13 @@ class TransitionModel(nn.Module):
 
     def forward(self, z_t, action):
         x = torch.cat([z_t, action], dim=1)
-        z_next_pred = self.net(x)
+        delta = self.net(x)
+        z_next_pred = z_t + delta
         return z_next_pred
 
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim=128):
+    def __init__(self, latent_dim=256):
         super().__init__()
 
         self.fc = nn.Linear(latent_dim, 256 * 8 * 8)
@@ -91,9 +92,9 @@ class Decoder(nn.Module):
 
 
 class MiniDriveGAN(nn.Module):
-    def __init__(self, latent_dim=128, action_dim=1):
+    def __init__(self, latent_dim=128, action_dim=1,in_channels =12):
         super().__init__()
-        self.encoder = Encoder(latent_dim=latent_dim)
+        self.encoder = Encoder(latent_dim=latent_dim, in_channels = in_channels)
         self.transition = TransitionModel(latent_dim=latent_dim, action_dim=action_dim)
         self.decoder = Decoder(latent_dim=latent_dim)
 

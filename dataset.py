@@ -8,7 +8,7 @@ from torchvision import transforms #이미지 크기, tensor 변환
 
 
 class DrivingFrameDataset(Dataset): #데이터셋을 상속받아 사용
-    def __init__(self, csv_path, frame_dir, image_size=128):
+    def __init__(self, csv_path, frame_dir, image_size=128, num_input_frames = 4):
         if not os.path.exists(csv_path):
             raise FileNotFoundError(
                 f"CSV file not found: {csv_path}. Expected columns: frame, steering"
@@ -58,6 +58,7 @@ class DrivingFrameDataset(Dataset): #데이터셋을 상속받아 사용
             )
 
         self.frame_dir = frame_dir #프레임의 폴더 경로 slef.frame_dir저장
+        self.num_input_frames = num_input_frames
 
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),        #Resize로 이미지를 image_size x image_size로 맞춤
@@ -65,24 +66,50 @@ class DrivingFrameDataset(Dataset): #데이터셋을 상속받아 사용
         ])
 
     def __len__(self):
-        return len(self.data) - 1                   #idx와 idx + 1을 같이 씀 : 마지막 행은 current만 존재하고 next가 없으므로
+        # 최근 4프레임을 써야 하므로 시작 index를 확보해야 함
+        # 예: idx=3일 때 [0,1,2,3] -> target=4
+        return len(self.data) - self.num_input_frames 
 
     def __getitem__(self, idx):
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index out of range: {idx}. Valid range is 0 to {len(self) - 1}.")
 
-        current_row = self.data.iloc[idx]
-        next_row = self.data.iloc[idx + 1]
+        input_frames = []
+        for i in range(idx, idx + self.num_input_frames):
+            row = self.data.iloc[i]
+            img_path = os.path.join(self.frame_dir, row["frame"])
 
-        current_path = os.path.join(self.frame_dir, current_row["frame"])
+            img = Image.open(img_path).convert("RGB")
+            img = self.transform(img)
+            input_frames.append(img)
+
+        # [3, H, W] x 4 -> [12, H, W]
+        x_t = torch.cat(input_frames, dim=0)
+
+        # action은 마지막 입력 프레임 시점의 steering 사용
+        action_row = self.data.iloc[idx + self.num_input_frames - 1]
+        steering = torch.tensor([float(action_row["steering"])], dtype=torch.float32)
+
+        # target은 그 다음 프레임
+        next_row = self.data.iloc[idx + self.num_input_frames]
         next_path = os.path.join(self.frame_dir, next_row["frame"])
 
-        x_t = Image.open(current_path).convert("RGB")
         x_next = Image.open(next_path).convert("RGB")
+        x_next = self.transform(x_next)      
+        
+        """ 일단 기존 코드 킵"""
+        # current_row = self.data.iloc[idx]
+        # next_row = self.data.iloc[idx + 1]
 
-        x_t = self.transform(x_t) # 시점 t 프레임
-        x_next = self.transform(x_next) # 시점 t+1 프레임
+        # current_path = os.path.join(self.frame_dir, current_row["frame"])
+        # next_path = os.path.join(self.frame_dir, next_row["frame"])
 
-        steering = torch.tensor([float(current_row["steering"])], dtype=torch.float32)
+        # x_t = Image.open(current_path).convert("RGB")
+        # x_next = Image.open(next_path).convert("RGB")
+
+        # x_t = self.transform(x_t) # 시점 t 프레임
+        # x_next = self.transform(x_next) # 시점 t+1 프레임
+
+        # steering = torch.tensor([float(current_row["steering"])], dtype=torch.float32)
 
         return x_t, steering, x_next

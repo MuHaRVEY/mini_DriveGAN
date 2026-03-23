@@ -18,17 +18,21 @@ def train():
     lr = 1e-3
     epochs = 20
     image_size = 128
-    latent_dim = 128
+    latent_dim = 256
+    num_input_frames = 4
 
     dataset = DrivingFrameDataset(
         csv_path=csv_path,
         frame_dir=frame_dir,
-        image_size=image_size
+        image_size=image_size,
+        num_input_frames = num_input_frames
     )
 
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
 
-    model = MiniDriveGAN(latent_dim=latent_dim, action_dim=1).to(device)
+    model = MiniDriveGAN(latent_dim=latent_dim, action_dim=1,
+                         in_channels= 3 * num_input_frames
+                         ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     recon_loss_fn = nn.L1Loss()
@@ -51,7 +55,13 @@ def train():
 
             # optional latent consistency target
             with torch.no_grad():
-                z_next_true = model.encoder(x_next)
+                z_next_true = model.encoder(
+                    torch.cat([
+                        x_t[:,3:,:,:],
+                        x_next],
+                        dim=1)
+                )
+                
 
             loss_latent = nn.functional.mse_loss(z_next_pred, z_next_true)
 

@@ -1,7 +1,9 @@
 data_from_kaggle.zip
 data/
 checkpoints/
+checkpoints_1차모델/
 outputs/
+outputs_1차모델/
 __pycache__/
 *.pyc
 *.pyo
