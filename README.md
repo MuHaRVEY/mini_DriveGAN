@@ -3,7 +3,7 @@
 mini_DriveGAN/
 ├─ data/
 │  ├─ frames/          # 학습에 사용하는 주행 이미지 프레임
-│  └─ labels.csv       # 이미지 파일명과 steering 값 정보
+│  └─ labels.csv       # 이미지 파일명과 steering 값 정보 + throttle, brake, speed 함께 사용하기로 결정
 ├─ dataset.py          # 데이터셋 로딩 및 (현재 프레임, 조향값, 다음 프레임) 구성
 ├─ model.py            # Encoder, Transition Model, Decoder로 이루어진 1단계 모델
 ├─ train.py            # 학습 실행 코드
