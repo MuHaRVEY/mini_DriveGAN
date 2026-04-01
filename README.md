@@ -2,13 +2,15 @@
 ```bash
 mini_DriveGAN/
 ├─ data/
-│  ├─ frames/          # 학습에 사용하는 주행 이미지 프레임
-│  └─ labels.csv       # 이미지 파일명과 steering 값 정보 + throttle, brake, speed 함께 사용하기로 결정
-├─ dataset.py          # 데이터셋 로딩 및 (현재 프레임, 조향값, 다음 프레임) 구성
-├─ model.py            # Encoder, Transition Model, Decoder로 이루어진 1단계 모델
-├─ train.py            # 학습 실행 코드
-├─ utils.py            # 예측 결과 이미지 저장 함수
-└─ prepare_from_zip.py # 원본 zip 파일에서 필요한 이미지와 labels.csv 생성
+│  ├─ frames/              # 주행 이미지 프레임
+│  └─ labels.csv           # steering, throttle, brake, speed 포함
+├─ dataset.py              # (multi-frame sequence, action, next frame) 구성
+├─ model.py                # Encoder, ThemeTransition(GRU), ContentTransition(ConvLSTM), Decoder
+├─ train.py                # 학습 코드 (gradient clipping, lr 조정 포함)
+├─ utils.py                # 예측 이미지 저장
+├─ prepare_from_zip.py     # raw dataset → frames + labels.csv 생성
+└─ results/
+   └─ epoch_xxx.png        # 학습 결과 이미지
 ```
 
 [Used Kaggle Dataset](https://www.kaggle.com/datasets/andy8744/udacity-self-driving-car-behavioural-cloning?resource=download&select=self_driving_car_dataset_jungle)
@@ -117,4 +119,135 @@ DriveGAN의 전체 재현이 아니라, world model의 핵심 아이디어라고
 
 <img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/4699880a-beca-43ec-82d4-18257352cf5c" />
 
+## 5차
 
+다음과 같은 현상이 지속적으로 나타났다.
+
+action을 추가하더라도 결과 이미지의 차이가 크지 않음
+생성 이미지가 점점 평균적인 형태로 수렴함
+학습이 진행될수록 loss가 다시 증가하며 불안정해짐
+결과 이미지에 grid 형태의 artifact가 나타남
+
+평균적인 것을 학습하는 방식이 아닌, GAN을 통해
+- discriminator가 “진짜 같은지” 판단
+- generator가 더 realistic하게 생성
+  을 수행하고자 했다.
+
+  실험 결과,
+기존보다 이미지가 더 선명해지기보다는 오히려 다음과 같은 문제가 나타났다.
+
+- 색 번짐
+- 격자(grid) 형태의 artifact
+- 구조 붕괴
+- 학습의 불안정성 증가
+
+즉 GAN을 도입한다고 해서 바로 이미지 품질이 좋아지는 것은 아니었고,
+오히려 generator와 discriminator의 균형을 맞추는 것이 매우 어렵다는 점을 직접 확인할 수 있었다.
+
+**이번 실험을 통해 느낀 점**
+
+GAN은 blur 문제를 해결할 가능성이 있는 방법이지만, 동시에 학습이 매우 불안정하다.
+단순히 discriminator를 추가하는 것만으로는 충분하지 않다.
+generator와 discriminator의 구조, loss 비율, learning rate, 학습 안정화 기법이 매우 중요하다.
+생성 모델에 대한 이해 없이 GAN을 바로 적용하면 오히려 결과가 더 악화될 수 있다.
+<img width="522" height="392" alt="epoch_010" src="https://github.com/user-attachments/assets/b9a07ac1-5e03-4295-b412-bdd28df3f596" />
+<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/2884d1ed-f373-4048-a106-4930ea928986" />
+
+
+일단은 본 실험을 멈추고 GAN, Diffusion Model과 같은 생성 모델과
+강화 학습<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/cff0c2f9-25db-4339-9d5a-7336209fb7df" />
+
+## 3차
+- 2차에서 4개의 프레임을 함께 입력으로 사용하였으나
+- 프레임들을 채널 방향으로 단순히 결합하는 방식이라 시간 순서에 따라 상태를 누적하는 구조가 아니었음.
+
+이를 보완하기 위해 각 프레임을 인코더에 한 장씩 통과시켜 특징맵들을 시간 순서대로 ConvLSTM에 입력해보기로 함.
+
+**변경 사항**
+- 멀티 프레임 채널 결합 -> 순서 기반의 입력 방식
+- HIDDEN STATE로 각 프레임을 순차적으로 처리하여 누적시킴
+- 마지막 hidden state에 조향값 정보를 반영하여 다음 프레임을 예측하는 것으로
+
+진행 방향이 조금 더 잘 맞는 것처럼 보여지나 여전히 흐리게 나타나 정확성은 모르겠다.
+
+- 시간 정보를 입력할때의 처리 방식 자체의 중요성을 알 수 있었고
+- 정답 이미지를 최대한 똑같이 복사하려고 학습하는 reconstruction-based? 방식의 학습은 결국 이미지 생성에 한계점이 있어 보임
+- nn.L1Loss()로 배우는 모델의 한계점을 확인할 수 있었음
+- 평균적인 장면을 그리면서 흐릿한 결과만이 나타나는 것으로 보임.
+<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/da0166a5-ecc5-4816-b112-e0951af8dccb" />
+
+## 2026-03-23 4차
+
+3차에서는 ConvLSTM을 이용하여 프레임 시퀀스를 시간 순서대로 처리하는 구조로 수정하였지만,  
+여전히 생성된 이미지가 흐리게 나타나는 문제가 남아 있었다.
+
+이후에는 단순히 steering 값 하나만으로는 다음 장면 변화를 충분히 설명하기 어렵다고 판단하였다.  
+실제 주행에서는 동일한 steering 값이라도 speed, throttle, brake 값에 따라  
+다음 프레임의 변화가 달라질 수 있기 때문이다.
+
+그래서 4차에서는 action 정보를 확장하여,
+
+- steering
+- throttle
+- brake
+- speed
+
+를 함께 사용하는 방식으로 수정하였다.
+
+즉 기존의 단일 action 입력에서 벗어나,  
+조향뿐만 아니라 가속, 감속, 현재 속도까지 함께 반영하는  
+보다 풍부한 제어 정보 기반 예측을 시도하였다.
+
+하지만 실험 결과, 전체적인 장면 구조는 여전히 어느 정도 따라가더라도  
+생성 이미지는 계속 흐리게 나타났고,  
+학습 loss 또한 안정적으로 감소하지 않고 후반으로 갈수록 오히려 증가하는 모습을 보였다.
+
+이를 통해 다음과 같은 점을 확인할 수 있었다.
+
+- action 정보를 늘리는 것만으로는 blur 문제가 해결되지 않는다.
+- 현재 학습 방식이 reconstruction 중심이기 때문에, 여러 가능한 미래 중 평균적인 이미지를 생성하는 경향이 있다.
+- 모델 구조뿐 아니라, 학습 방식 자체를 바꿔야 할 필요가 있다.
+
+즉 4차에서는 입력 정보의 부족 문제를 줄이기 위해 action을 확장해보았지만,  
+시각적 품질과 학습 안정성 측면에서는 여전히 한계가 남아 있었고,  
+이로부터 이후에는 GAN과 같은 adversarial learning이 필요하다고 판단하게 되었다.
+
+<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/4699880a-beca-43ec-82d4-18257352cf5c" />
+
+## 5차
+
+다음과 같은 현상이 지속적으로 나타났다.
+
+action을 추가하더라도 결과 이미지의 차이가 크지 않음
+생성 이미지가 점점 평균적인 형태로 수렴함
+학습이 진행될수록 loss가 다시 증가하며 불안정해짐
+결과 이미지에 grid 형태의 artifact가 나타남
+
+평균적인 것을 학습하는 방식이 아닌, GAN을 통해
+- discriminator가 “진짜 같은지” 판단
+- generator가 더 realistic하게 생성
+  을 수행하고자 했다.
+
+  실험 결과,
+기존보다 이미지가 더 선명해지기보다는 오히려 다음과 같은 문제가 나타났다.
+
+- 색 번짐
+- 격자(grid) 형태의 artifact
+- 구조 붕괴
+- 학습의 불안정성 증가
+
+즉 GAN을 도입한다고 해서 바로 이미지 품질이 좋아지는 것은 아니었고,
+오히려 generator와 discriminator의 균형을 맞추는 것이 매우 어렵다는 점을 직접 확인할 수 있었다.
+
+**이번 실험을 통해 느낀 점**
+
+GAN은 blur 문제를 해결할 가능성이 있는 방법이지만, 동시에 학습이 매우 불안정하다.
+단순히 discriminator를 추가하는 것만으로는 충분하지 않다.
+generator와 discriminator의 구조, loss 비율, learning rate, 학습 안정화 기법이 매우 중요하다.
+생성 모델에 대한 이해 없이 GAN을 바로 적용하면 오히려 결과가 더 악화될 수 있다.
+<img width="522" height="392" alt="epoch_010" src="https://github.com/user-attachments/assets/b9a07ac1-5e03-4295-b412-bdd28df3f596" />
+<img width="522" height="392" alt="epoch_020" src="https://github.com/user-attachments/assets/2884d1ed-f373-4048-a106-4930ea928986" />
+
+
+일단은 본 실험을 멈추고 GAN, Diffusion Model과 같은 생성 모델과
+강화 학습, RNN, 트랜스포머 등 부족한 개념을 채우는 데에 시간을 쓰기로 하였다.
