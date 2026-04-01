@@ -59,14 +59,31 @@ class Encoder(nn.Module):
 class ThemeTransition(nn.Module):
     def __init__(self, theme_dim=64, action_dim=4):
         super().__init__()
-        self.gru = nn.GRUCell(theme_dim + action_dim, theme_dim)
+
+        # action을 더 큰 표현으로 바꿔줌
+        self.action_embed = nn.Sequential(
+            nn.Linear(action_dim, 32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, theme_dim)
+        )
+
+        # theme + action_embed를 함께 사용
+        self.gru = nn.GRUCell(theme_dim + theme_dim, theme_dim)
 
     def forward(self, theme_seq, action):
+        """
+        theme_seq: [B, T, theme_dim]
+        action: [B, action_dim]
+        """
         bsz, seq_len, theme_dim = theme_seq.shape
+
         h = theme_seq[:, 0]
 
+        # action을 theme_dim 크기로 키움
+        a_embed = self.action_embed(action)   # [B, theme_dim]
+
         for t in range(seq_len):
-            x = torch.cat([theme_seq[:, t], action], dim=1)
+            x = torch.cat([theme_seq[:, t], a_embed], dim=1)
             h = self.gru(x, h)
 
         return h
@@ -81,8 +98,11 @@ class ContentTransition(nn.Module):
 
         self.dep_lstm = ConvLSTMCell(self.dep_dim, self.dep_dim)
         self.ind_lstm = ConvLSTMCell(self.ind_dim, self.ind_dim)
-        self.action_embed = nn.Linear(action_dim, self.dep_dim)
-
+        self.action_embed = nn.Sequential(
+            nn.Linear(action_dim, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, self.dep_dim)
+        )
     def init_state(self, batch_size, channels, height, width, device):
         h = torch.zeros(batch_size, channels, height, width, device=device)
         c = torch.zeros(batch_size, channels, height, width, device=device)
@@ -116,14 +136,17 @@ class Decoder(nn.Module):
         self.theme_to_scale = nn.Linear(theme_dim, hidden_dim)
         self.theme_to_shift = nn.Linear(theme_dim, hidden_dim)
 
-        self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dim, 128, 4, 2, 1),
+        self.deconv = nn.Sequential(  #더 깊게 수정 
+            nn.ConvTranspose2d(hidden_dim, 256, 4, 2, 1),
+            nn.ReLU(inplace=True),
+
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
             nn.ReLU(inplace=True),
 
             nn.ConvTranspose2d(128, 64, 4, 2, 1),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(64, 3, 4, 2, 1),
+            nn.Conv2d(64, 3, 3, 1, 1),
             nn.Sigmoid(),
         )
 

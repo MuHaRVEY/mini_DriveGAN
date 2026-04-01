@@ -1,10 +1,12 @@
 data_from_kaggle.zip
 data/
 checkpoints/
+checkpoints4차/
 checkpoints_3차/
 checkpoints_1차모델/
 checkpoints_2차/
 outputs/
+outputs4차/
 outputs_3차/
 outputs_1차모델/
 outputs_2차/

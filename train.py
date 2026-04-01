@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from dataset import DrivingSequenceDataset
-from model import MiniDriveGANPaperLike
+from model import MiniDriveGANPaperLike, Discriminator
 from utils import save_prediction_samples
 
 
@@ -15,12 +15,14 @@ def train():
     frame_dir = "data/frames"
 
     batch_size = 8
-    lr = 1e-4 #학습률 0.0001로 수정
+    lr_G = 1e-4
+    lr_D = 1e-4 
     epochs = 20
     image_size = 128
     hidden_dim = 256
     theme_dim = 64
     seq_len = 4
+    action_dim = 4
 
     dataset = DrivingSequenceDataset(
         csv_path=csv_path,
@@ -36,70 +38,120 @@ def train():
         num_workers=0
     )
 
-    model = MiniDriveGANPaperLike(
+    # Generator / Discriminator
+    G = MiniDriveGANPaperLike(  
         hidden_dim=hidden_dim,
         theme_dim=theme_dim,
-        action_dim=4
+        action_dim=action_dim
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    D = Discriminator().to(device)
 
+    # Optimizer
+    optimizer_G = torch.optim.Adam(G.parameters(), lr=lr_G, betas=(0.5, 0.999))
+    optimizer_D = torch.optim.Adam(D.parameters(), lr=lr_D, betas=(0.5, 0.999))
+
+    # Losses
     recon_loss_fn = nn.L1Loss()
     theme_loss_fn = nn.MSELoss()
     content_loss_fn = nn.MSELoss()
+    adv_loss_fn = nn.BCELoss()
 
     os.makedirs("outputs", exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
 
     for epoch in range(1, epochs + 1):
-        model.train()
-        total_loss = 0.0
+        G.train()
+        D.train()
+
+        total_g_loss = 0.0
+        total_d_loss = 0.0
 
         for x_seq, action, x_next in loader:
             x_seq = x_seq.to(device)         # [B, T, 3, H, W]
-            # steering = steering.to(device)   # [B, 1]
-            action = action.to(device)     # [B, 4]
+            action = action.to(device)       # [B, 4]
             x_next = x_next.to(device)       # [B, 3, H, W]
 
-            # forward
-            x_pred, theme_seq, content_seq, next_theme_pred, next_content_pred = model(x_seq, action)
+            batch_size_cur = x_next.size(0)
 
-            # 1. reconstruction loss
+            real_labels = torch.ones(batch_size_cur, 1, device=device)
+            fake_labels = torch.zeros(batch_size_cur, 1, device=device)
+
+            # =========================================================
+            # 1. Generator forward
+            # =========================================================
+            x_pred, theme_seq, content_seq, next_theme_pred, next_content_pred = G(x_seq, action)
+
+            # =========================================================
+            # 2. Train Discriminator
+            # =========================================================
+            optimizer_D.zero_grad()
+
+            # real
+            d_real = D(x_next)
+            loss_d_real = adv_loss_fn(d_real, real_labels)
+
+            # fake
+            d_fake = D(x_pred.detach())
+            loss_d_fake = adv_loss_fn(d_fake, fake_labels)
+
+            loss_D = 0.5 * (loss_d_real + loss_d_fake)
+            loss_D.backward()
+            torch.nn.utils.clip_grad_norm_(D.parameters(), max_norm=1.0)
+            optimizer_D.step()
+
+            # =========================================================
+            # 3. Train Generator
+            # =========================================================
+            optimizer_G.zero_grad()
+
+            # reconstruction loss
             loss_recon = recon_loss_fn(x_pred, x_next)
 
-            # 2. latent consistency target
+            # latent target
             with torch.no_grad():
                 # 입력 시퀀스에서 첫 프레임 제거 + 실제 다음 프레임 추가
                 next_seq = torch.cat([x_seq[:, 1:], x_next.unsqueeze(1)], dim=1)
 
-                next_theme_seq_true, next_content_seq_true = model.encode_sequence(next_seq)
+                next_theme_seq_true, next_content_seq_true = G.encode_sequence(next_seq)
 
-                # 마지막 프레임에 해당하는 latent를 정답 target으로 사용
                 next_theme_true = next_theme_seq_true[:, -1]       # [B, theme_dim]
                 next_content_true = next_content_seq_true[:, -1]   # [B, C, H, W]
 
             loss_theme = theme_loss_fn(next_theme_pred, next_theme_true)
             loss_content = content_loss_fn(next_content_pred, next_content_true)
 
-            # 최종 loss
-            loss = loss_recon + 0.1 * loss_theme + 0.1 * loss_content
+            # adversarial loss for generator
+            d_fake_for_g = D(x_pred)
+            loss_G_adv = adv_loss_fn(d_fake_for_g, real_labels)
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # gradient clipping
-            # clip_grad_norm_으로 모델의 모든 매개변수의 그래디언트가 max_norm을 넘지 않도록 클리핑
-            optimizer.step()
+            # final generator loss
+            loss_G = (          
+                0.5 *loss_recon
+                + 0.2 * loss_theme
+                + 0.2 * loss_content
+                + 0.01 * loss_G_adv
+            )
 
-            total_loss += loss.item()
+            loss_G.backward()
+            torch.nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
+            optimizer_G.step()
 
-        avg_loss = total_loss / len(loader)
+            total_g_loss += loss_G.item()
+            total_d_loss += loss_D.item()
+
+        avg_g_loss = total_g_loss / len(loader)
+        avg_d_loss = total_d_loss / len(loader)
+
         print(
             f"Epoch [{epoch}/{epochs}] "
-            f"Loss: {avg_loss:.4f}"
+            f"G Loss: {avg_g_loss:.4f} | D Loss: {avg_d_loss:.4f}"
         )
 
-        # 샘플 저장
-        model.eval()
+        # =========================================================
+        # 4. Save sample outputs
+        # =========================================================
+        G.eval()
         with torch.no_grad():
             sample_batch = next(iter(loader))
             x_seq, action, x_next = sample_batch
@@ -108,7 +160,7 @@ def train():
             action = action.to(device)
             x_next = x_next.to(device)
 
-            x_pred, _, _, _, _ = model(x_seq, action)
+            x_pred, _, _, _, _ = G(x_seq, action)
 
             save_prediction_samples(
                 x_seq.cpu(),
@@ -118,9 +170,16 @@ def train():
                 epoch
             )
 
+        # =========================================================
+        # 5. Save checkpoints
+        # =========================================================
         torch.save(
-            model.state_dict(),
-            f"checkpoints/mini_drivegan_paperlike_epoch_{epoch}.pth"
+            G.state_dict(),
+            f"checkpoints/generator_epoch_{epoch}.pth"
+        )
+        torch.save(
+            D.state_dict(),
+            f"checkpoints/discriminator_epoch_{epoch}.pth"
         )
 
 
