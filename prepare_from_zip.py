@@ -32,6 +32,10 @@ with zipfile.ZipFile(ZIP_PATH, "r") as z:
 
         center_path = str(row["center"]).strip()
         steering = float(row["steering"])
+        throttle = float(row["throttle"])
+        brake = float(row["brake"])
+        speed = float(row["speed"])
+
 
         # CSV 안에는 윈도우 절대경로가 들어있으므로 파일명만 추출
         filename_only = os.path.basename(center_path)
@@ -51,12 +55,13 @@ with zipfile.ZipFile(ZIP_PATH, "r") as z:
             img = Image.open(img_file).convert("RGB")
             img.save(out_img_path)
 
-        rows.append([new_filename, steering])
+        rows.append([new_filename, steering,
+                     throttle, brake, speed])
         new_index += 1
 
 with open(OUT_CSV_PATH, "w", newline="", encoding="utf-8") as f:
     writer = csv.writer(f)
-    writer.writerow(["frame", "steering"])
+    writer.writerow(["frame", "steering", "throttle", "brake", "speed"])
     writer.writerows(rows)
 
 print(f"Done. Saved {len(rows)} images.")

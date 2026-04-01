@@ -39,7 +39,11 @@ class DrivingSequenceDataset(Dataset):
 
         # 마지막 입력 프레임 시점의 steering 사용
         action_row = self.data.iloc[idx + self.seq_len - 1]
-        steering = torch.tensor([float(action_row["steering"])], dtype=torch.float32)
+        action = torch.tensor([float(action_row["steering"]),
+                               float(action_row["throttle"]),
+                               float(action_row["brake"]),
+                               float(action_row["speed"])/30.0 # 속도 정규화 시도)
+                               ], dtype=torch.float32)
 
         # 정답: 다음 프레임 x_{t+1}
         next_row = self.data.iloc[idx + self.seq_len]
@@ -48,4 +52,4 @@ class DrivingSequenceDataset(Dataset):
         x_next = Image.open(next_path).convert("RGB")
         x_next = self.transform(x_next)
 
-        return x_seq, steering, x_next
+        return x_seq, action, x_next

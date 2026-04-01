@@ -1,35 +1,3 @@
-"""
-[Mini DriveGAN Sequence ConvLSTM 구조]
-
-입력:
-    최근 4개의 연속된 주행 이미지 시퀀스
-    x_seq = [x_{t-3}, x_{t-2}, x_{t-1}, x_t]
-    shape: [B, T, 3, H, W]
-
-처리 흐름:
-
-    각 프레임을 Encoder(CNN)에 통과시켜 feature map으로 변환
-        x_{t-3} -> z_{t-3}
-        x_{t-2} -> z_{t-2}
-        x_{t-1} -> z_{t-1}
-        x_t     -> z_t
-
-    이 feature map sequence를 시간 순서대로 ConvLSTM에 입력
-        z_{t-3} -> ConvLSTM
-        z_{t-2} -> ConvLSTM
-        z_{t-1} -> ConvLSTM
-        z_t     -> ConvLSTM
-
-    마지막 hidden state에 steering action 반영
-        z_{t+1} = h_t + action_embedding(a_t)
-
-    Decoder를 통해 다음 프레임 예측
-        z_{t+1} -> x_{t+1}
-
-목표:
-    현재 시퀀스와 action을 바탕으로 다음 프레임 예측
-"""
-
 import torch
 import torch.nn as nn
 
@@ -38,8 +6,6 @@ class ConvLSTMCell(nn.Module):
     def __init__(self, input_dim, hidden_dim, kernel_size=3):
         super().__init__()
         padding = kernel_size // 2
-        self.hidden_dim = hidden_dim
-
         self.conv = nn.Conv2d(
             input_dim + hidden_dim,
             4 * hidden_dim,
@@ -50,7 +16,6 @@ class ConvLSTMCell(nn.Module):
     def forward(self, x, h_prev, c_prev):
         combined = torch.cat([x, h_prev], dim=1)
         gates = self.conv(combined)
-
         i, f, o, g = torch.chunk(gates, 4, dim=1)
 
         i = torch.sigmoid(i)
@@ -60,109 +25,165 @@ class ConvLSTMCell(nn.Module):
 
         c = f * c_prev + i * g
         h = o * torch.tanh(c)
-
         return h, c
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels=3, hidden_dim=256):
+    def __init__(self, in_channels=3, hidden_dim=256, theme_dim=64):
         super().__init__()
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 4, 2, 1),   # 128 -> 64
+        self.backbone = nn.Sequential(
+            nn.Conv2d(in_channels, 64, 4, 2, 1),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(64, 128, 4, 2, 1),          # 64 -> 32
+            nn.Conv2d(64, 128, 4, 2, 1),
             nn.ReLU(inplace=True),
 
-            nn.Conv2d(128, hidden_dim, 4, 2, 1),  # 32 -> 16
+            nn.Conv2d(128, hidden_dim, 4, 2, 1),
             nn.ReLU(inplace=True),
+        )
+
+        self.theme_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(hidden_dim, theme_dim)
         )
 
     def forward(self, x):
-        # x: [B, 3, H, W]
-        return self.conv(x)  # [B, hidden_dim, 16, 16]
+        feat = self.backbone(x)
+        theme = self.theme_head(feat)
+        content = feat
+        return theme, content
+
+
+class ThemeTransition(nn.Module):
+    def __init__(self, theme_dim=64, action_dim=4):
+        super().__init__()
+        self.gru = nn.GRUCell(theme_dim + action_dim, theme_dim)
+
+    def forward(self, theme_seq, action):
+        bsz, seq_len, theme_dim = theme_seq.shape
+        h = theme_seq[:, 0]
+
+        for t in range(seq_len):
+            x = torch.cat([theme_seq[:, t], action], dim=1)
+            h = self.gru(x, h)
+
+        return h
+
+
+class ContentTransition(nn.Module):
+    def __init__(self, hidden_dim=256, action_dim=4):
+        super().__init__()
+        assert hidden_dim % 2 == 0
+        self.dep_dim = hidden_dim // 2
+        self.ind_dim = hidden_dim // 2
+
+        self.dep_lstm = ConvLSTMCell(self.dep_dim, self.dep_dim)
+        self.ind_lstm = ConvLSTMCell(self.ind_dim, self.ind_dim)
+        self.action_embed = nn.Linear(action_dim, self.dep_dim)
+
+    def init_state(self, batch_size, channels, height, width, device):
+        h = torch.zeros(batch_size, channels, height, width, device=device)
+        c = torch.zeros(batch_size, channels, height, width, device=device)
+        return h, c
+
+    def forward(self, content_seq, action):
+        bsz, seq_len, channels, height, width = content_seq.shape
+        device = content_seq.device
+
+        dep_h, dep_c = self.init_state(bsz, self.dep_dim, height, width, device)
+        ind_h, ind_c = self.init_state(bsz, self.ind_dim, height, width, device)
+
+        a = self.action_embed(action)
+        a = a.view(bsz, self.dep_dim, 1, 1).expand(-1, -1, height, width)
+
+        for t in range(seq_len):
+            feat_t = content_seq[:, t]
+            dep_t, ind_t = torch.split(feat_t, [self.dep_dim, self.ind_dim], dim=1)
+
+            dep_input = dep_t + a
+            dep_h, dep_c = self.dep_lstm(dep_input, dep_h, dep_c)
+            ind_h, ind_c = self.ind_lstm(ind_t, ind_h, ind_c)
+
+        next_content = torch.cat([dep_h, ind_h], dim=1)
+        return next_content
 
 
 class Decoder(nn.Module):
-    def __init__(self, hidden_dim=256):
+    def __init__(self, hidden_dim=256, theme_dim=64):
         super().__init__()
+        self.theme_to_scale = nn.Linear(theme_dim, hidden_dim)
+        self.theme_to_shift = nn.Linear(theme_dim, hidden_dim)
 
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(hidden_dim, 128, 4, 2, 1),  # 16 -> 32
+            nn.ConvTranspose2d(hidden_dim, 128, 4, 2, 1),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),         # 32 -> 64
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(64, 3, 4, 2, 1),           # 64 -> 128
+            nn.ConvTranspose2d(64, 3, 4, 2, 1),
             nn.Sigmoid(),
         )
 
-    def forward(self, z):
-        return self.deconv(z)
+    def forward(self, theme, content):
+        bsz, channels, height, width = content.shape
+        scale = self.theme_to_scale(theme).view(bsz, channels, 1, 1)
+        shift = self.theme_to_shift(theme).view(bsz, channels, 1, 1)
+        fused = content * (1 + scale) + shift
+        return self.deconv(fused)
 
 
-class SequenceConvLSTMTransition(nn.Module):
-    def __init__(self, hidden_dim=256, action_dim=1):
+class MiniDriveGANPaperLike(nn.Module):
+    def __init__(self, hidden_dim=256, theme_dim=64, action_dim=4):
         super().__init__()
-        self.hidden_dim = hidden_dim
-        self.convlstm = ConvLSTMCell(input_dim=hidden_dim, hidden_dim=hidden_dim)
-        self.action_embed = nn.Linear(action_dim, hidden_dim)
-
-    def init_state(self, batch_size, height, width, device):
-        h = torch.zeros(batch_size, self.hidden_dim, height, width, device=device)
-        c = torch.zeros(batch_size, self.hidden_dim, height, width, device=device)
-        return h, c
-
-    def forward(self, z_seq, action):
-        """
-        z_seq: [B, T, C, H, W]
-        action: [B, 1]
-        """
-        bsz, seq_len, channels, height, width = z_seq.shape
-        device = z_seq.device
-
-        h, c = self.init_state(bsz, height, width, device)
-
-        # 프레임 순서대로 ConvLSTM 처리
-        for t in range(seq_len):
-            z_t = z_seq[:, t]  # [B, C, H, W]
-            h, c = self.convlstm(z_t, h, c)
-
-        # 마지막 hidden state에 action 반영
-        a = self.action_embed(action)              # [B, C]
-        a = a.view(bsz, channels, 1, 1).expand(-1, -1, height, width)
-
-        z_next_pred = h + a
-        return z_next_pred, h, c
-
-
-class MiniDriveGANSequence(nn.Module):
-    def __init__(self, hidden_dim=256, action_dim=1):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.encoder = Encoder(in_channels=3, hidden_dim=hidden_dim)
-        self.transition = SequenceConvLSTMTransition(hidden_dim=hidden_dim, action_dim=action_dim)
-        self.decoder = Decoder(hidden_dim=hidden_dim)
+        self.encoder = Encoder(in_channels=3, hidden_dim=hidden_dim, theme_dim=theme_dim)
+        self.theme_transition = ThemeTransition(theme_dim=theme_dim, action_dim=action_dim)
+        self.content_transition = ContentTransition(hidden_dim=hidden_dim, action_dim=action_dim)
+        self.decoder = Decoder(hidden_dim=hidden_dim, theme_dim=theme_dim)
 
     def encode_sequence(self, x_seq):
-        """
-        x_seq: [B, T, 3, H, W]
-        return: [B, T, C, H, W]
-        """
-        bsz, seq_len, ch, h, w = x_seq.shape
-        encoded = []
+        theme_list = []
+        content_list = []
 
-        for t in range(seq_len):
-            feat = self.encoder(x_seq[:, t])  # [B, C, 16, 16]
-            encoded.append(feat)
+        for t in range(x_seq.size(1)):
+            theme_t, content_t = self.encoder(x_seq[:, t])
+            theme_list.append(theme_t)
+            content_list.append(content_t)
 
-        z_seq = torch.stack(encoded, dim=1)
-        return z_seq
+        theme_seq = torch.stack(theme_list, dim=1)
+        content_seq = torch.stack(content_list, dim=1)
+        return theme_seq, content_seq
 
     def forward(self, x_seq, action):
-        z_seq = self.encode_sequence(x_seq)
-        z_next_pred, h, c = self.transition(z_seq, action)
-        x_next_pred = self.decoder(z_next_pred)
-        return x_next_pred, z_seq, z_next_pred, h, c
+        theme_seq, content_seq = self.encode_sequence(x_seq)
+        next_theme = self.theme_transition(theme_seq, action)
+        next_content = self.content_transition(content_seq, action)
+        x_next_pred = self.decoder(next_theme, next_content)
+        return x_next_pred, theme_seq, content_seq, next_theme, next_content
+
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 64, 4, 2, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(64, 128, 4, 2, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            nn.Conv2d(128, 256, 4, 2, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        feat = self.features(x)
+        return self.classifier(feat)
